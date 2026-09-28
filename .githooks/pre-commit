@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Protect workshop credentials from accidental commits.
+# This hook checks only staged files, so local .env files remain untouched.
+
+blocked=0
+
+while IFS= read -r -d '' file; do
+  # Block dotenv files if someone force-adds them.
+  case "$file" in
+    .env|*/.env|.env.*|*/.env.*)
+      echo "ERROR: refusing to commit dotenv file: $file" >&2
+      blocked=1
+      continue
+      ;;
+  esac
+
+  # Skip deleted files and files that cannot be read from the index.
+  if ! git cat-file -e ":$file" 2>/dev/null; then
+    continue
+  fi
+
+  staged=$(git show ":$file" 2>/dev/null || true)
+
+  # Detect real-looking OpenRouter API keys in staged content.
+  if printf '%s' "$staged" | grep -Eaq 'sk-or-v1-[A-Za-z0-9_-]{20,}'; then
+    echo "ERROR: possible OpenRouter API key found in staged file: $file" >&2
+    blocked=1
+  fi
+
+  # Detect CTFd access tokens (ctfd_<64 hex>), and any CTFD_TOKEN assignment
+  # except our known dummy placeholder.
+  if printf '%s' "$staged" | grep -Eaq 'ctfd_[0-9a-f]{40,}'; then
+    echo "ERROR: possible CTFd access token found in staged file: $file" >&2
+    blocked=1
+  fi
+  if printf '%s' "$staged" \
+      | grep -Ea 'CTFD_TOKEN[[:space:]]*=' \
+      | grep -Evq 'CTFD_TOKEN[[:space:]]*=[[:space:]]*put-your-ctfd-token-here'; then
+    echo "ERROR: possible CTFd token found in staged file: $file" >&2
+    blocked=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [[ "$blocked" -ne 0 ]]; then
+  cat >&2 <<'EOF'
+
+Commit blocked to protect workshop credentials.
+Keep API keys and CTFd passwords only in your local .env file.
+If a real credential was exposed, rotate/change it before continuing.
+EOF
+  exit 1
+fi
